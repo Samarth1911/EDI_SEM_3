@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Execution under latent liquidity — live backend</title><link rel="stylesheet" href="style.css">
+<style>
+#msg{padding:6px 26px;color:var(--mut);font-size:12px;min-height:28px}#msg.err{color:var(--sh)}
+.side{max-height:600px;overflow:auto}.kpi{cursor:pointer}.kpi.off{opacity:.4}.kpi b{font-size:22px}
+input[type=number],input[type=text]{width:92px;background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font:inherit}
+.st{color:#b48cff}
+</style></head><body>
+<header>
+  <div class="brand"><h1>Execution under latent liquidity · live backend</h1>
+    <p>FastAPI step API · IMM particle filter (calm / stressed) · TWAP, benchmarks and trained DDQN agents on the same world</p></div>
+  <div class="tags"><a class="chip" href="index.html" style="text-decoration:none">← offline milestone demo</a></div>
+</header>
+<section class="bar">
+  <label>Seed <input id="seed" type="number" value="900000"></label>
+  <label>Obs <select id="obs"><option>gaussian</option><option>spread_hawkes</option></select></label>
+  <label>Agents <input id="pol" type="text" style="width:250px" value="ens_filt_full_bonus,ens_oracle,ens_raw_proxy" title="comma-separated Stage 3 policies; empty = server defaults. Gaussian default: ens_filt_full_bonus, ens_oracle, ens_raw_proxy. spread_hawkes: ens_oracle, ens_raw_proxy, ens_filt_full, ens_filt_mean_only (no bonus, no-regime or single-filter agents on that arm)"></label>
+  <button id="go" class="btn">↺ New episode</button><button id="step" class="btn" disabled>Step</button><button id="run" class="btn primary" disabled>▶ Run</button>
+  <label>Speed <select id="spd"><option value="700">0.5×</option><option value="350" selected>1×</option><option value="120">3×</option></select></label>
+  <div class="grow"></div>
+  <label>Shock size <input id="mult" type="range" min="2" max="5" step="0.5" value="3"><b id="mv">×3</b></label>
+  <button id="shock" class="btn shock" disabled>Inject liquidity shock</button>
+  <button id="frc" class="btn shock" disabled>Force stressed ×5</button>
+  <div class="prog"><i id="progi"></i></div><span id="stepv" class="mono">step 0 / 50</span>
+</section>
+<div id="msg">Start the API (uvicorn, port 8000), then press New episode.</div>
+<main>
+  <article class="card cloud"><h2>Particle cloud · hidden temporary impact α, per regime<small>log scale · <u class="tb">teal</u> calm-regime particles · <u class="st">violet</u> stressed-regime particles (opacity = weight) · <u class="to">amber</u> true α · white line = pooled filter estimate</small></h2><canvas id="c-cloud"></canvas></article>
+  <aside class="side" id="side"></aside>
+  <article class="card"><h2>Mid-price<small>dashed = common world price · policies' own prices (click cards to show/hide)</small></h2><canvas id="c-price"></canvas></article>
+  <article class="card"><h2>Regime probability<small>filter P(stressed) · shaded = TRUE stressed periods</small></h2><canvas id="c-reg"></canvas></article>
+  <article class="card"><h2>Trade rate<small>shares per step, selected policies</small></h2><canvas id="c-rate"></canvas></article>
+  <article class="card"><h2>Posterior uncertainty (std of α̂)<small>×1e-6 · pooled over regimes</small></h2><canvas id="c-std"></canvas></article>
+  <article class="card" style="grid-column:span 12"><h2>Live belief state<small id="bsub">filtering posterior at the current step</small></h2>
+    <div class="filt" style="grid-template-columns:repeat(6,1fr)">
+      <div><span>α̂ ± std</span><b id="f-est" class="mono">—</b></div><div><span>true α</span><b id="f-true" class="mono">—</b></div>
+      <div><span>κ̂ ± std</span><b id="f-k" class="mono">—</b></div><div><span>ESS</span><b id="f-ess" class="mono">—</b></div>
+      <div><span>P(stressed)</span><b id="f-p" class="mono">—</b></div><div><span>true regime</span><b id="f-r" class="pill">—</b></div></div></article>
+</main>
+<footer>Cost on each card is cumulative on shares sold so far; compare FINAL values (a slowed policy has sold less mid-episode). Oracle-type policies use the true state. One shock per episode (simulator limit); a shock or forced regime takes effect at the next step. ens_* policies average the Q-values of the 5 training seeds' validation-selected agents; on spread_hawkes they exist only for oracle, raw_proxy, filt_full and filt_mean_only (exploratory: seeds 3-4 were added after the 3-seed results were seen), and the filter is overconfident on that arm (Stage 2: alpha 90% coverage 0.54).</footer>
+<script src="model.js"></script>
+<script>
+"use strict";
+const M = EDI.model, API = new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+const $ = (i) => document.getElementById(i), store = M.createStore(), V = store.view;
+const C = { tw: "#8796a8", be: "#35d0b5", or: "#f0b24a", sh: "#ff6a5e", st: "#b48cff", grid: "#1b2632", ax: "#6c7b8b", tx: "#d9e1ea" };
+const PAL = ["#35d0b5", "#f0b24a", "#6fb1ea", "#e58bd0", "#a3d977", "#d9a6ff", "#7fd1d9"];
+let eid = null, sel = new Set(), timer = null, busy = false, pShock = null, pForce = false, shockUsed = false;
+const colOf = (n) => (n === "twap" ? C.tw : PAL[store.names().filter((x) => x !== "twap").indexOf(n) % PAL.length]);
+const msg = (t, e) => { $("msg").textContent = t; $("msg").className = e ? "err" : ""; };
+const DEF_AGENTS = { gaussian: "ens_filt_full_bonus,ens_oracle,ens_raw_proxy", spread_hawkes: "ens_filt_full,ens_oracle,ens_raw_proxy,ens_filt_mean_only" };
+const hawkesNote = () => ($("obs").value === "spread_hawkes" ? " Hawkes arm: agents were trained on spread-Hawkes observations (exploratory; the filter is overconfident here)." : "");
+$("obs").onchange = () => {   // swap the default agent list only if the field still holds one of the defaults
+  const cur = $("pol").value.trim();
+  if (cur === "" || Object.values(DEF_AGENTS).includes(cur)) $("pol").value = DEF_AGENTS[$("obs").value] || "";
+  msg("Observation arm: " + $("obs").value + ". Press New episode." + hawkesNote());
+};
+
+async function call(path, method, body) {
+  const r = await fetch(API + path, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  let j = null; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(r.status + " " + ((j && (typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail))) || r.statusText));
+  return j;
+}
+function btns() { const live = eid && !V.done; $("step").disabled = !live; $("run").disabled = !live; $("shock").disabled = !live || shockUsed; $("frc").disabled = !live; }
+
+async function newEpisode() {
+  stop(); busy = false;
+  try {
+    const extra = $("pol").value.split(",").map((s) => s.trim()).filter(Boolean);
+    const req = { seed: +$("seed").value, obs_kind: $("obs").value, regime_preset: "default", particle_sample: 200 };
+    if (extra.length) req.policies = ["twap", "ce_filtered", "heuristic_belief", ...extra];
+    const d = await call("/api/episode", "POST", req);
+    eid = d.episode_id || d.id; store.reset(Object.assign({}, d, { episode_id: eid }));
+    sel = new Set(); pShock = null; pForce = false; shockUsed = false; btns(); draw();
+    msg("Episode " + eid + " ready. " + (d.notes ? String(d.notes) : "") + hawkesNote());
+  } catch (e) { msg("Cannot start: " + e.message + " (is uvicorn running on " + API + "?)", true); }
+}
+async function doStep() {
+  if (!eid || busy || V.done) return; busy = true;
+  const body = {}; if (pShock) body.inject_shock = pShock; if (pForce) body.force_regime = { regime: 1, duration: 5 };
+  try {
+    const r = await call("/api/episode/" + eid + "/step", "POST", body);
+    if (body.inject_shock) shockUsed = true; pShock = null; pForce = false;
+    const a = store.apply(r);
+    if (a.errors && a.errors.length) msg("schema warnings: " + a.errors.slice(0, 2).join("; "), true);
+    if (!sel.size) M.defaultPlotSet(store.names()).forEach((n) => sel.add(n));
+    btns(); draw();
+    if (r.done) { stop(); await fetchResult(); }
+  } catch (e) {
+    const had = pShock || pForce; pShock = null; pForce = false; stop();
+    msg("Step failed: " + e.message + (had ? " (your shock/force request was dropped; the episode is unchanged, press Step to continue)" : ""), true);
+  }
+  busy = false;
+}
+async function fetchResult() {
+  try { const r = await call("/api/episode/" + eid + "/result", "GET"), ce = r.contract_errors;
+    msg("Finished. Contract errors: " + (ce && typeof ce === "object" ? Object.values(ce).flat().length : 0) + ".");
+  } catch (e) { msg("Finished (result unavailable: " + e.message + ")", true); }
+}
+function stop() { if (timer) clearTimeout(timer); timer = null; $("run").textContent = "▶ Run"; }
+function loop() { if (!timer) return; doStep().then(() => { if (timer && !V.done) timer = setTimeout(loop, +$("spd").value); }); }
+$("go").onclick = newEpisode; $("step").onclick = doStep;
+$("run").onclick = () => { if (timer) return stop(); $("run").textContent = "❚❚ Pause"; timer = setTimeout(loop, 0); };
+$("mult").oninput = () => { $("mv").textContent = "×" + $("mult").value; };
+$("shock").onclick = () => { if (shockUsed) return; pShock = +$("mult").value; msg("Shock ×" + pShock + " will hit the NEXT step (one per episode)."); };
+$("frc").onclick = () => { pForce = true; msg("Stressed regime will be forced for 5 steps from the NEXT step."); };
+
+/* ---------- drawing (same look as the milestone dashboard) ---------- */
+function frame(id, o) {
+  const cv = $(id), d = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = Math.round(w * d); cv.height = Math.round(h * d);
+  const c = cv.getContext("2d"); c.setTransform(d, 0, 0, d, 0, 0); c.clearRect(0, 0, w, h);
+  const L = 54, R = 10, T = 8, B = 20, N = V.N, X = (i) => L + (i / N) * (w - L - R);
+  const Y = (v) => T + (1 - (o.log ? (Math.log(v) - Math.log(o.y0)) / (Math.log(o.y1) - Math.log(o.y0)) : (v - o.y0) / (o.y1 - o.y0))) * (h - T - B);
+  c.font = "10.5px ui-monospace,Consolas,monospace"; c.textBaseline = "middle";
+  (o.ticks || [0, 1, 2, 3, 4].map((i) => o.y0 + ((o.y1 - o.y0) * i) / 4)).forEach((v) => {
+    c.strokeStyle = C.grid; c.lineWidth = 1; c.beginPath(); c.moveTo(L, Y(v)); c.lineTo(w - R, Y(v)); c.stroke();
+    c.fillStyle = C.ax; c.textAlign = "right"; c.fillText(o.fmt(v), L - 6, Y(v)); });
+  c.textAlign = "center"; for (let i = 0; i <= N; i += 10) { c.fillStyle = C.ax; c.fillText(i, X(i), h - 8); }
+  V.events.forEach((e) => { if (!/shock|regime/.test(e.type)) return; c.strokeStyle = C.sh; c.setLineDash([4, 4]); c.beginPath();
+    c.moveTo(X(e.t), T); c.lineTo(X(e.t), h - B); c.stroke(); c.setLineDash([]); c.fillStyle = C.sh; c.textAlign = "left"; c.fillText(/shock/.test(e.type) ? "⚡" : "◆", X(e.t) + 4, T + 8); });
+  return { c, X, Y, w, h, T, B };
+}
+function line(F, ys, col, wd, dash) { const c = F.c, t = V.H.t; c.strokeStyle = col; c.lineWidth = wd || 1.6; c.setLineDash(dash || []); c.lineJoin = "round"; c.beginPath(); let on = false;
+  ys.forEach((v, i) => { if (!M.isNum(v)) { on = false; return; } on ? c.lineTo(F.X(t[i]), F.Y(v)) : c.moveTo(F.X(t[i]), F.Y(v)); on = true; }); c.stroke(); c.setLineDash([]); }
+function rng(arrs, pad) { let a = Infinity, b = -Infinity; for (const r of arrs) for (const v of r) if (M.isNum(v)) { if (v < a) a = v; if (v > b) b = v; }
+  if (!isFinite(a)) return [0, 1]; if (a === b) { a -= 1; b += 1; } const p = (b - a) * (pad == null ? 0.08 : pad); return [a - p, b + p]; }
+
+function drawCloud() {
+  const H = V.H; let lo = Infinity, hi = 0, any = false;
+  const see = (v) => { if (v > 0) { if (v < lo) lo = v; if (v > hi) hi = v; } };
+  V.cloud.forEach((cl) => { if (cl) { any = true; cl.regimes.forEach((g) => g.alpha.forEach(see)); } });
+  H.alpha.forEach(see); H.a_mean.forEach(see);
+  if (!isFinite(lo)) { lo = 6e-5; hi = 1e-3; } else { lo *= 0.8; hi *= 1.25; }
+  const F = frame("c-cloud", { y0: lo, y1: hi, log: true, ticks: [0, 1, 2, 3].map((i) => lo * Math.pow(hi / lo, i / 3)), fmt: (v) => v.toExponential(1) });
+  const c = F.c, sw = (F.X(1) - F.X(0)) * 0.8, rc = ["53,208,181", "180,140,255"];
+  V.cloud.forEach((cl, i) => { if (!cl) return; const t = H.t[i];
+    cl.regimes.forEach((g, j) => g.alpha.forEach((a, k) => { c.fillStyle = "rgba(" + rc[j % 2] + "," + Math.min(0.8, 0.1 + 0.7 * g.wRel[k] * Math.max(g.prob, 0)).toFixed(2) + ")";
+      c.beginPath(); c.arc(F.X(t) + (((k * 0.618) % 1) - 0.5) * sw, F.Y(Math.max(a, lo)), 1.7, 0, 6.3); c.fill(); })); });
+  line(F, H.alpha, C.or, 1.8); line(F, H.a_mean, C.tx, 1.3);
+  if (!any) { c.fillStyle = C.ax; c.textAlign = "left"; c.fillText(V.steps.length ? "no `particles` block in the step response (apply the 4C particle patch)" : "press New episode, then Step / Run", F.X(1), F.T + 24); }
+}
+function drawOthers() {
+  const H = V.H, ser = [...sel].filter((n) => V.P[n]);
+  { const [a, b] = rng([H.S_truth, ...ser.map((n) => V.P[n].S)]); const F = frame("c-price", { y0: a, y1: b, fmt: (v) => v.toFixed(2) });
+    line(F, H.S_truth, C.ax, 1.2, [4, 3]); ser.forEach((n) => line(F, V.P[n].S, colOf(n))); }
+  { const F = frame("c-reg", { y0: 0, y1: 1, fmt: (v) => v.toFixed(2) });
+    F.c.fillStyle = "rgba(180,140,255,.14)"; H.t.forEach((t, i) => { if (H.regime[i] === 1) F.c.fillRect(F.X(t), F.T, F.X(t + 1) - F.X(t), F.h - F.T - F.B); });
+    line(F, H.pr.map((p) => (p.length > 1 ? p[1] : NaN)), C.st); }
+  { const mx = Math.max(1, ...ser.flatMap((n) => V.P[n].v.filter(M.isNum))) * 1.08; const F = frame("c-rate", { y0: 0, y1: mx, fmt: (v) => Math.round(v) });
+    ser.forEach((n) => line(F, V.P[n].v, colOf(n), n === "twap" ? 1.4 : 1.6)); }
+  { const s = H.a_std.map((v) => v * 1e6); const F = frame("c-std", { y0: 0, y1: Math.max(2, ...s.filter(M.isNum)) * 1.12, fmt: (v) => v.toFixed(1) }); line(F, s, C.be); }
+}
+function drawBelief() {
+  const H = V.H, i = H.t.length - 1, nm = (V.cfg && V.cfg.regime_names) || [];
+  $("progi").style.width = (V.N ? ((i + 1) / V.N) * 100 : 0) + "%"; $("stepv").textContent = "step " + (i + 1) + " / " + V.N;
+  if (i < 0) return; const p = H.pr[i];
+  $("f-est").textContent = M.fmtSci(H.a_mean[i]) + " ± " + M.fmtSci(H.a_std[i], 1); $("f-true").textContent = M.fmtSci(H.alpha[i]);
+  $("f-k").textContent = M.fmtSci(H.k_mean[i]) + " ± " + M.fmtSci(H.k_std[i], 1); $("f-ess").textContent = M.isNum(H.ess[i]) ? Math.round(H.ess[i]).toLocaleString() : "—";
+  $("f-p").textContent = p.length > 1 ? p[1].toFixed(2) : "—";
+  const r = H.regime[i], pill = $("f-r"), ok = p.length > 1 && (p[1] >= 0.5) === (r === 1);
+  pill.textContent = (nm[r] || r) + (p.length > 1 ? (ok ? " · filter agrees" : " · filter disagrees") : ""); pill.className = "pill " + (ok ? "ok" : "low");
+}
+function drawSide() {
+  const nm = store.names().sort((a, b) => (M.GROUP_ORDER[M.classifyPolicy(a).group] - M.GROUP_ORDER[M.classifyPolicy(b).group]) || a.localeCompare(b));
+  $("side").innerHTML = nm.map((n) => { const c = M.classifyPolicy(n), d = store.deltaVsTwap(n), cps = store.costPerShare(n), m = store.lastOf(V.P[n].mult), k = colOf(n);
+    const dl = d == null ? "$" + (M.isNum(cps) ? cps.toFixed(3) : "—") + "/share so far" : n === "twap" ? "reference" : (d <= 0 ? "▼ " : "▲ ") + M.fmtUSD(Math.abs(d)) + " vs TWAP · FINAL";
+    const cls = d != null && n !== "twap" ? (d < 0 ? "win" : d > 0 ? "lose" : "") : "";
+    return `<div class="kpi ${cls} ${sel.has(n) ? "" : "off"}${V.done ? " final" : ""}" data-n="${M.esc(n)}" style="border-left-color:${k}"><span class="lab"><i class="dot" style="background:${k}"></i>${M.esc(n)}</span>` +
+      `<b class="mono">${M.fmtUSD(store.lastOf(V.P[n].cost))}</b><em class="mono">${dl}</em><small>${c.label}${c.usesTruth ? " · uses true state" : ""}${M.isNum(m) ? " · last mult " + m.toFixed(2) + "×" : ""}</small></div>`; }).join("");
+  document.querySelectorAll(".kpi").forEach((e) => (e.onclick = () => { const n = e.dataset.n; sel.has(n) ? sel.delete(n) : sel.add(n); draw(); }));
+}
+function draw() { drawSide(); drawCloud(); drawOthers(); drawBelief(); }
+addEventListener("resize", draw); draw();
+</script></body></html>

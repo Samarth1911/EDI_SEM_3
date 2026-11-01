@@ -1,0 +1,221 @@
+"""
+run_stage3c_multiseed.py -- multi-seed driver for Stage 3 ablations (a)/(b)/(c). Run from EDI/validation.
+NOT RUN by its author. Uses only functions whose calls are visible in run_stage3b2.py
+(make_env, train_v2, restore, run_episodes, paired, EVAL_BASE); their bodies were not seen.
+
+PROTOCOL (fixes the problems seen in the single-seed 3B runs)
+  * every arm x several training seeds; PRIMARY result = the LAST checkpoint on the held-out TEST worlds.
+    best_val is also stored but is selection-biased (winner's curse over ~75 noisy validation readings);
+    treat it as secondary.
+  * reported spread is ACROSS TRAINING SEEDS. The paired se on the test worlds only measures world noise.
+  * instability metric: fraction of post-burn-in validation checkpoints worse than TWAP by > --collapse (default 300 $).
+  * results are appended to outputs/stage3c/results.jsonl; finished (arm, seed) pairs are skipped on rerun,
+    so you can stop and resume. Use --aggregate-only to just print the table.
+
+ARMS  (a) oracle | raw_proxy | filt_full        (b) filt_mean_only | filt_full      (c) filt_no_regime | filt_single | filt_full
+  filt_mean_only : filtered, no posterior-std features        filt_no_regime : IMM belief, pooled moments, no regime probs
+  filt_single    : single-regime bootstrap-style filter (K=1)
+  filt_full_bonus / filt_mean_bonus: filt_full / filt_mean_only plus the exploration bonus (stage3c_bonus.py), trained via
+  ddqn_train3.train_v3. Ablation (b) = filt_mean_only vs filt_full (std features) vs filt_mean_bonus vs filt_full_bonus.
+  ALL arms use train_v3 with the TWAP reward baseline ON by default (--no-baseline reproduces the 3B reward); results go
+  to results_base{0|1}<tag>.jsonl so baseline / beta sweeps never mix (use --tag for a beta sweep).
+
+COST: filtered arms ran ~2065 s per 15000 episodes (live particle filter in the loop) vs ~275 s for oracle.
+  Run oracle/raw_proxy first; budget the filtered arms deliberately (e.g. --arms filt_full --seeds 3).
+REFERENCE (diag_headroom.py, 200 worlds from seed 900000, noise-free diff vs TWAP): causal oracle on the grid
+  -90.8 (se 7.5), ungridded -101.5, non-causal ceiling -193.4. Only comparable when --eval-episodes 200.
+
+V2 CHANGES (NOT RUN by their author; results-file format only gains keys, old files still aggregate):
+  * every finished (arm, seed) now SAVES two agents to outputs/stage3c/ckpt/: <arm>_base<0|1><tag>_s<seed>_valsel.npz
+    (the validation-selected checkpoint = the deployable policy) and ..._last.npz. Load with ddqn.DDQNAgent.load(path).
+    Use --no-save-ckpt to skip. Without this a crashed or finished run left no agent on disk.
+  * --ema D (default 0 = old behaviour via ddqn_train3.train_v3): use ddqn_train4.train_v4 with an EMA of the online
+    weights (validation, selection and the final agent use the EMA weights). A hypothesis test, see ddqn_train4.py.
+  * the aggregate column 'best_val nf (biased)' is renamed 'val-sel nf (test)': it is the TEST-world score of the
+    checkpoint picked on the validation worlds (validation seeds 800000+, test seeds 900000+, disjoint by the asserts in
+    ddqn_train2/3), so it is a held-out number; it is the VALIDATION score of that checkpoint that is optimistic.
+    A val-sel CVaR95 column is added. The primary metric is a team decision (see STAGE3_HANDOFF.md).
+"""
+import argparse, json, os, sys, time
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "src"))
+import numpy as np
+
+ARMS = {
+    "oracle":         dict(arm="oracle"),
+    "raw_proxy":      dict(arm="raw_proxy"),
+    "filt_full":      dict(arm="filtered"),
+    "filt_mean_only": dict(arm="filtered", no_unc=True),
+    "filt_no_regime": dict(arm="filtered", no_regime=True),
+    "filt_single":    dict(arm="filtered", filt="single"),
+    "filt_full_bonus": dict(arm="filtered", bonus=True),
+    "filt_mean_bonus": dict(arm="filtered", no_unc=True, bonus=True),
+}
+REF_GRID, REF_CEIL = -90.8, -193.4
+
+
+def _jd(o):
+    return o.item() if hasattr(o, "item") else str(o)
+
+
+def load(path):
+    if not os.path.exists(path):
+        return []
+    with open(path) as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def aggregate(recs, eval_n):
+    print(f"\n{'arm':16s} {'n':>2s} {'LAST nf diff mean':>18s} {'sd(seeds)':>9s} {'min..max':>15s} {'#<-2se':>6s} "
+          f"{'CVaR95 diff':>11s} {'mult calm/str':>13s} {'collapse':>8s} | {'val-sel nf (test)':>18s} {'val-sel CVaR95':>14s}")
+    for name in ARMS:
+        rs = [r for r in recs if r["arm_name"] == name]
+        if not rs:
+            continue
+        d = np.array([r["last"]["nf"]["diff"] for r in rs]); se = np.array([r["last"]["nf"]["se"] for r in rs])
+        cv = np.mean([r["last"]["full"]["cvar95"] - r["last"]["full"]["base_cvar95"] for r in rs])
+        mc = np.mean([r["last"]["mult"]["0"][0] for r in rs]); ms = np.mean([r["last"]["mult"]["1"][0] for r in rs])
+        col = np.mean([r["val_collapse_frac"] for r in rs])
+        bv = np.mean([r["best_val"]["nf"]["diff"] for r in rs])
+        cvs = np.mean([r["best_val"]["full"]["cvar95"] - r["best_val"]["full"]["base_cvar95"] for r in rs])
+        sd = d.std(ddof=1) if len(d) > 1 else float("nan")
+        print(f"{name:16s} {len(d):2d} {d.mean():+18.1f} {sd:9.1f} {d.min():+7.1f}..{d.max():+6.1f} "
+              f"{int((d < -2 * se).sum()):3d}/{len(d):<2d} {cv:+11.0f} {mc:6.3f}/{ms:6.3f} {col:8.2f} | {bv:+18.1f} {cvs:+14.0f}")
+    if eval_n == 200:
+        print(f"\nreference (200 worlds): causal oracle on grid {REF_GRID}, non-causal ceiling {REF_CEIL}; "
+              f"'last nf diff' below 0 is better than TWAP.")
+    print("sd(seeds) = spread over TRAINING seeds; '#<-2se' = seeds whose test gain exceeds 2 paired se.")
+    print("val-sel = checkpoint chosen on the validation worlds, scored on the test worlds; CVaR95 diffs are vs TWAP ($).")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--arms", default=",".join(ARMS))
+    ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--episodes", type=int, default=15000)
+    ap.add_argument("--eval-episodes", type=int, default=500)
+    ap.add_argument("--obs-kind", default="gaussian", choices=["gaussian", "spread_hawkes"])
+    ap.add_argument("--imm-particles", type=int, default=2000)
+    ap.add_argument("--reward-scale", type=float, default=0.1)
+    ap.add_argument("--eps-decay-frac", type=float, default=0.3)
+    ap.add_argument("--update-every", type=int, default=4)
+    ap.add_argument("--target-sync", type=int, default=500)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--val-every", type=int, default=200)
+    ap.add_argument("--n-val", type=int, default=60)
+    ap.add_argument("--collapse", type=float, default=300.0)
+    ap.add_argument("--bonus-beta", type=float, default=1.0)
+    ap.add_argument("--bonus-anneal", type=float, default=0.8)
+    ap.add_argument("--unc-source", default="pooled", choices=["pooled", "within"])
+    ap.add_argument("--no-baseline", action="store_true")
+    ap.add_argument("--ema", type=float, default=0.0, help="EMA decay of the online weights (0 = off, e.g. 0.999)")
+    ap.add_argument("--no-save-ckpt", action="store_true")
+    ap.add_argument("--use-cache", action="store_true", help="replay cached beliefs for filtered arms")
+    ap.add_argument("--cache-root", default=None)
+    ap.add_argument("--tag", default="")
+    ap.add_argument("--grid", default=None,
+                    help="comma-separated action multipliers (sorted, must contain 1.0), e.g. 0.658,0.756,0.87,1.0,1.15,1.323,1.521. "
+                         "Requires --tag. Run check_grid_env.py first.")
+    ap.add_argument("--aggregate-only", action="store_true")
+    a = ap.parse_args()
+    GRID = tuple(float(x) for x in a.grid.split(",")) if a.grid else None
+    if GRID is not None:
+        assert 1.0 in GRID and list(GRID) == sorted(GRID), "grid must be sorted and contain 1.0 (the TWAP multiplier)"
+        assert a.tag, "--grid requires a non-empty --tag: results files are keyed by tag only, grids must not mix"
+        print(f"custom action grid {GRID}. NOTE: the REFERENCE line printed by the aggregate refers to the DEFAULT "
+              f"7-point grid; use diag_headroom.py --grid for this grid.")
+    ckw = dict(action_multipliers=GRID) if GRID is not None else {}
+
+    od = os.path.join(HERE, "outputs", "stage3c"); os.makedirs(od, exist_ok=True)
+    path = os.path.join(od, f"results_base{int(not a.no_baseline)}{a.tag}.jsonl")
+    if a.aggregate_only:
+        aggregate([r for r in load(path) if r["episodes"] == a.episodes and r["eval_episodes"] == a.eval_episodes],
+                  a.eval_episodes)
+        return
+
+    from belief_mdp_env import EnvConfig
+    from env_factory import make_env
+    from imm_particle_filter import IMMParams
+    from ddqn import DDQNConfig
+    from ddqn_train import run_episodes, paired, EVAL_BASE, TRAIN_BASE
+    from ddqn_train2 import VAL_BASE
+    from ddqn_train2 import restore
+    from ddqn_train3 import train_v3, twap_baseline_residual
+    from ddqn_train4 import train_v4
+
+    def build_real(spec, seed):
+        single = spec.get("filt") == "single"
+        return make_env(EnvConfig(obs_mode=spec["arm"], use_uncertainty=not spec.get("no_unc", False),
+                                  use_regime=not spec.get("no_regime", False), n_regimes=1 if single else 2,
+                                  reward_scale=a.reward_scale, **ckw),
+                        obs_kind=a.obs_kind, filter_regimes="single" if single else "imm", seed=seed,
+                        imm_params=IMMParams(n_particles=a.imm_particles), stationary_init=True)
+
+    def build(spec, seed):
+        if not (a.use_cache and spec["arm"] == "filtered"):
+            return build_real(spec, seed)
+        from belief_cache import BeliefCache, make_cached_env
+        single = spec.get("filt") == "single"
+        cfg = EnvConfig(obs_mode="filtered", use_uncertainty=not spec.get("no_unc", False),
+                        use_regime=not spec.get("no_regime", False), n_regimes=1 if single else 2,
+                        reward_scale=a.reward_scale, **ckw)
+        root = a.cache_root or os.path.join(HERE, "outputs", "belief_cache")
+        cache = BeliefCache(root, "single" if single else "imm", a.obs_kind, a.imm_particles,
+                            [(TRAIN_BASE * (seed + 1), a.episodes), (VAL_BASE, a.n_val), (EVAL_BASE, a.eval_episodes)])
+        return make_cached_env(cfg, cache)
+
+    test_seeds = range(EVAL_BASE, EVAL_BASE + a.eval_episodes)
+    twap = run_episodes(build(ARMS["oracle"], 0), test_seeds, None)      # TWAP depends on the worlds only
+    if not a.no_baseline:
+        res0 = twap_baseline_residual(build(ARMS["oracle"], 0), 0)
+        print(f"TWAP baseline residual (must be ~0): {res0:.2e}")
+        assert res0 < 1e-6, "TWAP baseline does not cancel (env reward not 'decomp', or baseline formula wrong)"
+
+    def score(env, agent):
+        res = run_episodes(env, test_seeds, agent)
+        return dict(nf=paired(res, twap, "IS_decomp"), full=paired(res, twap, "IS"),
+                    mult={str(k): v for k, v in res["mult_by_regime"].items()}, max_q_left=float(res["q_left"].max()))
+
+    done = {(r["arm_name"], r["seed"]) for r in load(path)
+            if r["episodes"] == a.episodes and r["eval_episodes"] == a.eval_episodes}
+    for name in [x for x in a.arms.split(",") if x]:
+        for seed in range(a.seeds):
+            if (name, seed) in done:
+                print(f"skip {name} seed {seed} (done)"); continue
+            env = build(ARMS[name], seed)
+            cfg = DDQNConfig(eps_decay_frac=a.eps_decay_frac, update_every=a.update_every,
+                             target_sync=a.target_sync, lr=a.lr)
+            t0 = time.time()
+            beta = a.bonus_beta if ARMS[name].get("bonus") else 0.0
+            kw = dict(val_every=a.val_every, n_val=a.n_val, explore_radius=None, bonus_beta=beta,
+                      bonus_anneal=a.bonus_anneal, unc_source=a.unc_source, baseline=not a.no_baseline)
+            if a.ema > 0:
+                agent, log, curve, best = train_v4(env, cfg, a.episodes, seed, ema_decay=a.ema, **kw)
+            else:
+                agent, log, curve, best = train_v3(env, cfg, a.episodes, seed, **kw)
+            stem = f"{name}_base{int(not a.no_baseline)}{a.tag}_s{seed}"
+            ckdir = os.path.join(od, "ckpt")
+            if not a.no_save_ckpt:
+                os.makedirs(ckdir, exist_ok=True)
+            last = score(env, agent)
+            if not a.no_save_ckpt:
+                agent.save(os.path.join(ckdir, stem + "_last.npz"))
+            restore(agent, best["snap"])
+            bv = score(env, agent)
+            if not a.no_save_ckpt:
+                agent.save(os.path.join(ckdir, stem + "_valsel.npz"))
+            post = [r["val_diff_nf"] for r in curve if r["ep"] >= 0.5 * a.episodes]
+            rec = dict(arm_name=name, seed=seed, episodes=a.episodes, eval_episodes=a.eval_episodes,
+                       obs_kind=a.obs_kind, secs=time.time() - t0, baseline=not a.no_baseline, bonus_beta=beta, last=last, best_val=bv, best_val_ep=best["ep"], ckpt=None if a.no_save_ckpt else stem, ema=a.ema,
+                       val_collapse_frac=float(np.mean(np.array(post) > a.collapse)) if post else float("nan"),
+                       val_last5_mean=float(np.mean([r["val_diff_nf"] for r in curve[-5:]])), args=vars(a))
+            with open(path, "a") as f:
+                f.write(json.dumps(rec, default=_jd) + "\n")
+            print(f"[{name} s{seed}] {rec['secs']:.0f}s  LAST nf diff {last['nf']['diff']:+.1f} (se {last['nf']['se']:.1f})  "
+                  f"best_val {bv['nf']['diff']:+.1f}  collapse_frac {rec['val_collapse_frac']:.2f}")
+    aggregate([r for r in load(path) if r["episodes"] == a.episodes and r["eval_episodes"] == a.eval_episodes],
+              a.eval_episodes)
+
+
+if __name__ == "__main__":
+    main()

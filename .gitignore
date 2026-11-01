@@ -1,0 +1,57 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- Virtual environments ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- Jupyter ----------
+.ipynb_checkpoints/
+
+# ---------- Secrets / local config ----------
+.env
+.env.*
+*.key
+*.pem
+
+# ---------- Editors / OS ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Project: large / regenerable Stage 3 artifacts ----------
+# Belief cache (rebuilt by validation/build_belief_cache.py; can be many GB)
+validation/outputs/belief_cache/
+# Trained agent checkpoints and training logs (regenerable via run_stage3c_multiseed.py)
+validation/outputs/stage3c/ckpt/
+validation/outputs/stage3c/logs/
+# Exported episode-log pickles (made by export_agent_logs.py)
+validation/outputs/**/*.pkl
+validation/outputs/**/*.pickle
+
+# Binary array dumps anywhere in the project
+*.npy
+*.npz
+
+# NOTE: small result files are intentionally KEPT in git:
+#   validation/outputs/stage3c/results_base*.jsonl
+#   validation/outputs/stage3c/*.md / *.json reports
+#   validation/outputs/stage2_results.md
+# If the repo gets too big, also ignore generated figures:
+# validation/outputs/**/*.png

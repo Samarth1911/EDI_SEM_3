@@ -1,0 +1,270 @@
+{
+  "A_regression": {
+    "max_abs_diff": 0.0,
+    "bit_for_bit": true,
+    "n_cases": 3
+  },
+  "B_chain_default": {
+    "n": 100000,
+    "P_true": [
+      [
+        0.96,
+        0.04
+      ],
+      [
+        0.08,
+        0.92
+      ]
+    ],
+    "P_hat": [
+      [
+        0.9603011329755515,
+        0.03969886702444842
+      ],
+      [
+        0.08089307411907655,
+        0.9191069258809235
+      ]
+    ],
+    "max_abs_P_err": 0.0008930741190765756,
+    "pi_true": [
+      0.6666666666666665,
+      0.3333333333333334
+    ],
+    "pi_hat": [
+      0.6708032919670803,
+      0.32919670803291967
+    ],
+    "sojourn_true": [
+      24.99999999999998,
+      12.500000000000007
+    ],
+    "sojourn_hat": [
+      25.18519909842224,
+      12.36199774690199
+    ],
+    "max_rel_sojourn_err": 0.011040180247841385,
+    "hard_pass": true
+  },
+  "C_default": {
+    "n_steps": 4000,
+    "regimes": {
+      "calm": {
+        "frac_time": 0.5976005998500374,
+        "alpha_mean": 0.0002162136704349722,
+        "alpha_longrun_theory": 0.00015,
+        "kappa_mean": 1.4724641553650423e-05,
+        "kappa_longrun_theory": 1.25e-05,
+        "dS_std": 0.0028310102962287318,
+        "dS_std_theory": 0.00282842712474619,
+        "alpha_revert_hat": 0.059948217912106104,
+        "alpha_revert_theory": 0.06,
+        "kappa_revert_hat": 0.06052869532847511,
+        "kappa_revert_theory": 0.06
+      },
+      "stressed": {
+        "frac_time": 0.4023994001499625,
+        "alpha_mean": 0.0003294744621422505,
+        "alpha_longrun_theory": 0.00037499999999999995,
+        "kappa_mean": 1.851655393061284e-05,
+        "kappa_longrun_theory": 2e-05,
+        "dS_std": 0.004518597548073909,
+        "dS_std_theory": 0.004525483399593904,
+        "alpha_revert_hat": 0.12015255108778054,
+        "alpha_revert_theory": 0.12,
+        "kappa_revert_hat": 0.12160462839628149,
+        "kappa_revert_theory": 0.12
+      }
+    },
+    "revert_max_rel_err": 0.013371903302345833,
+    "hard_pass_revert": true,
+    "separation": {
+      "alpha_auc": 0.9159194287065107,
+      "kappa_auc": 0.9128239698039491,
+      "alpha_ks_stat": 0.655050383035763,
+      "alpha_cohens_d": 2.1013012125133104,
+      "alpha_ratio_realised": 1.523837329431685,
+      "alpha_ratio_theory": 2.5,
+      "dS_std_ratio_realised": 1.5961077761155655,
+      "dS_std_ratio_theory": 1.6,
+      "spread_auc_one_step_gaussian": 0.9154439984830207
+    },
+    "stress_run_reachability": {
+      "n_runs": 99,
+      "mean_run_len_steps": 16.2020202020202,
+      "frac_runs_where_alpha_reaches_midpoint": 0.8383838383838383,
+      "median_steps_to_midpoint": 2.0
+    }
+  },
+  "C_subtle": {
+    "n_steps": 4000,
+    "regimes": {
+      "calm": {
+        "frac_time": 0.6935766058485379,
+        "alpha_mean": 0.00015500403817748996,
+        "alpha_longrun_theory": 0.00015,
+        "kappa_mean": 1.2728627122081249e-05,
+        "kappa_longrun_theory": 1.25e-05,
+        "dS_std": 0.002877656924318112,
+        "dS_std_theory": 0.00282842712474619,
+        "alpha_revert_hat": 0.05871956979490353,
+        "alpha_revert_theory": 0.06,
+        "kappa_revert_hat": 0.05419807351137245,
+        "kappa_revert_theory": 0.06
+      },
+      "stressed": {
+        "frac_time": 0.30642339415146214,
+        "alpha_mean": 0.00016490976998585974,
+        "alpha_longrun_theory": 0.00017249999999999996,
+        "kappa_mean": 1.315943873791944e-05,
+        "kappa_longrun_theory": 1.3500000000000001e-05,
+        "dS_std": 0.003552303972289519,
+        "dS_std_theory": 0.003394112549695428,
+        "alpha_revert_hat": 0.08667217500744126,
+        "alpha_revert_theory": 0.09,
+        "kappa_revert_hat": 0.08831722803784149,
+        "kappa_revert_theory": 0.09
+      }
+    },
+    "revert_max_rel_err": 0.09669877481045908,
+    "hard_pass_revert": true,
+    "separation": {
+      "alpha_auc": 0.8760536719427421,
+      "kappa_auc": 0.7956656819952089,
+      "alpha_ks_stat": 0.5979039724879855,
+      "alpha_cohens_d": 1.6953031191983499,
+      "alpha_ratio_realised": 1.0639062822158676,
+      "alpha_ratio_theory": 1.15,
+      "dS_std_ratio_realised": 1.234443182670662,
+      "dS_std_ratio_theory": 1.2,
+      "spread_auc_one_step_gaussian": 0.8018015076300791
+    },
+    "stress_run_reachability": {
+      "n_runs": 96,
+      "mean_run_len_steps": 12.46875,
+      "frac_runs_where_alpha_reaches_midpoint": 0.6145833333333334,
+      "median_steps_to_midpoint": 4.0
+    }
+  },
+  "D_hawkes_process": {
+    "params": {
+      "mu0": 50.0,
+      "mu_mult": [
+        1.0,
+        1.5
+      ],
+      "branching": [
+        0.5,
+        0.75
+      ],
+      "beta": 25.0,
+      "tau": 0.02,
+      "T_sim": 60.0
+    },
+    "regimes": {
+      "calm": {
+        "mu": 50.0,
+        "branching_theory": 0.5,
+        "branching_hat_moment": 0.5126705653021443,
+        "mean_intensity_theory": 100.0,
+        "mean_intensity_hat": 102.6,
+        "n_events": 6156,
+        "count_z": 1.0069756700139283,
+        "timerescale_ks_stat": 0.0104857975141045,
+        "timerescale_ks_p": 0.504318607791854,
+        "compensator_acf1": 0.0016370938463086324,
+        "expected_count_per_step": 2.0,
+        "fano_asymptotic": 4.0,
+        "hard_pass": true
+      },
+      "stressed": {
+        "mu": 75.0,
+        "branching_theory": 0.75,
+        "branching_hat_moment": 0.753032215575435,
+        "mean_intensity_theory": 300.0,
+        "mean_intensity_hat": 303.68333333333334,
+        "n_events": 18221,
+        "count_z": 0.4118091858562113,
+        "timerescale_ks_stat": 0.005973651244645661,
+        "timerescale_ks_p": 0.5318510961871962,
+        "compensator_acf1": -0.011612952535725795,
+        "expected_count_per_step": 6.0,
+        "fano_asymptotic": 16.0,
+        "hard_pass": true
+      }
+    },
+    "unstable_branching_rejected": true,
+    "hard_pass": true
+  },
+  "E_proxy_calm": {
+    "regime": 0,
+    "gaussian": {
+      "mean": -8.800497563718318e-05,
+      "std": 0.0017962574233865128,
+      "skew": 0.026084223493323944,
+      "excess_kurtosis": -0.18829561101318726,
+      "acf1": -0.012006157315527207,
+      "acf2": 0.015114917516153362,
+      "acf3": 0.014800423606310521,
+      "frac_gt_3_noise_std": 0.0,
+      "corr_spread_volume": 0.008667981492359644
+    },
+    "hawkes": {
+      "mean": -8.521226021007503e-05,
+      "std": 0.0024767040336564107,
+      "skew": 0.3916802117144891,
+      "excess_kurtosis": 0.2419315078847024,
+      "acf1": 0.10381204215179264,
+      "acf2": 0.14511561827649017,
+      "acf3": 0.061947311813071775,
+      "frac_gt_3_noise_std": 0.022,
+      "corr_spread_volume": -0.40784106975465245
+    },
+    "hawkes_count_mean_per_step": 1.9786666666666666,
+    "hawkes_count_fano": 1.4310368373764604,
+    "hawkes_count_acf1": 0.25388689540399056,
+    "resid_std_ratio_hawkes_over_gaussian": 1.378813527176434,
+    "mean_spread_diff_hawkes_minus_gaussian": 2.7927154271079058e-06
+  },
+  "E_proxy_stressed": {
+    "regime": 1,
+    "gaussian": {
+      "mean": -8.800497563718337e-05,
+      "std": 0.001796257423386513,
+      "skew": 0.026084223493324343,
+      "excess_kurtosis": -0.18829561101318815,
+      "acf1": -0.012006157315527191,
+      "acf2": 0.015114917516153488,
+      "acf3": 0.014800423606310583,
+      "frac_gt_3_noise_std": 0.0,
+      "corr_spread_volume": 0.008667981492359561
+    },
+    "hawkes": {
+      "mean": 0.004135461070497231,
+      "std": 0.003922723359946697,
+      "skew": 0.556611630492917,
+      "excess_kurtosis": 0.3151653452548233,
+      "acf1": 0.37149925830843183,
+      "acf2": 0.31811881790376995,
+      "acf3": 0.2853506397523181,
+      "frac_gt_3_noise_std": 0.332,
+      "corr_spread_volume": -0.7670722692716143
+    },
+    "hawkes_count_mean_per_step": 6.244,
+    "hawkes_count_fano": 1.964840486867393,
+    "hawkes_count_acf1": 0.4837163241733718,
+    "resid_std_ratio_hawkes_over_gaussian": 2.183831397924649,
+    "mean_spread_diff_hawkes_minus_gaussian": 0.004223466046134397
+  },
+  "F_hawkes_by_regime": {
+    "calm": {
+      "mean_events_per_step_realised": 2.3107486407360938,
+      "mean_events_per_step_stationary_theory": 2.0
+    },
+    "stressed": {
+      "mean_events_per_step_realised": 5.067122436295836,
+      "mean_events_per_step_stationary_theory": 6.0
+    }
+  },
+  "ALL_HARD_PASS": true
+}

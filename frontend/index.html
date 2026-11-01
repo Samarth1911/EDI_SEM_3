@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Execution under latent liquidity — live</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header>
+  <div class="brand"><h1>Execution under latent liquidity</h1>
+    <p>Bootstrap particle filter estimates hidden impact from noisy proxies · belief-informed heuristic vs TWAP vs oracle</p></div>
+  <div class="tags"><span class="chip warn"></span><span class="chip">heuristic policy — RL agent is next phase</span><a class="chip" href="dashboard.html" style="text-decoration:none;color:var(--be);border-color:#1d5a4e">live backend dashboard →</a></div>
+</header>
+<section class="bar">
+  <button id="run" class="btn primary">▶ Run</button><button id="reset" class="btn">↺ New episode</button>
+  <label>Speed <select id="speed"><option value="600">0.5×</option><option value="300" selected>1×</option><option value="140">2×</option><option value="60">5×</option></select></label>
+  <div class="grow"></div>
+  <label>Shock size <input id="mult" type="range" min="2" max="5" step="0.5" value="3"><b id="multv">×3</b></label>
+  <button id="shock" class="btn shock">Inject liquidity shock</button>
+  <div class="prog"><i id="progi"></i></div><span id="stepv" class="mono">step 0 / 50</span>
+</section>
+<main>
+  <article class="card cloud"><h2>Particle cloud · hidden temporary impact α<small>log scale · <u class="tp">grey</u> prior guesses · <u class="tb">teal</u> weighted posterior · <u class="to">amber</u> true α · teal line = filter estimate</small></h2><canvas id="c-cloud"></canvas></article>
+  <aside class="side">
+    <div class="kpi" data-k="twap"><span class="lab"><i class="dot tw"></i>TWAP</span><b id="is-twap" class="mono">$0</b><em id="d-twap" class="mono">baseline</em><small id="s-twap"></small></div>
+    <div class="kpi" data-k="belief"><span class="lab"><i class="dot be"></i>Belief heuristic</span><b id="is-belief" class="mono">$0</b><em id="d-belief" class="mono">—</em><small id="s-belief"></small></div>
+    <div class="kpi" data-k="oracle"><span class="lab"><i class="dot or"></i>Oracle (same rule, true α)</span><b id="is-oracle" class="mono">$0</b><em id="d-oracle" class="mono">—</em><small id="s-oracle"></small></div>
+    <div class="filt"><div><span>α̂ ± std</span><b id="f-est" class="mono">—</b></div><div><span>true α</span><b id="f-true" class="mono">—</b></div>
+      <div><span>ESS / 5000</span><b id="f-ess" class="mono">—</b></div><div><span>filter</span><b id="f-hp" class="pill">idle</b></div></div>
+  </aside>
+  <article class="card"><h2>Mid-price<small>permanent impact pushes each policy's own price down</small></h2><canvas id="c-price"></canvas></article>
+  <article class="card"><h2>Inventory remaining<small>% of 20,000 shares</small></h2><canvas id="c-inv"></canvas></article>
+  <article class="card"><h2>Trade rate<small>shares / interval — TWAP is flat, the heuristic reacts</small></h2><canvas id="c-rate"></canvas></article>
+  <article class="card"><h2>Posterior uncertainty (std of α̂)<small>×1e-6 · widens at a shock, narrows as it re-converges</small></h2><canvas id="c-std"></canvas></article>
+</main>
+<footer>IS shown is cumulative cost on shares sold so far (a slowed policy has sold less mid-episode — compare finals). Oracle = same rule given the true α, <u>not</u> an optimal-control benchmark. Validated shock range: ×2–×5; larger shocks fall outside the filter's jump prior. Uncertainty-aware variants did not beat mean-only in offline tests (see README).</footer>
+<script src="engine.js"></script><script src="app.js"></script></body></html>

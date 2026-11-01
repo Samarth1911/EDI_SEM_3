@@ -1,0 +1,360 @@
+"""
+live_session.py -- Stage 4C (Person 4). WRITTEN AGAINST THE CODE I WAS SHOWN; NOT RUN by its author.
+
+Framework-free live episode for the Stage 0 step API (interfaces.py C5). api_server.py is a thin HTTP layer on top.
+
+DESIGN
+  * One LiveEpisode = one seed. Each hosted policy has its OWN RegimeSwitchingSimulator generator (trades move S through
+    permanent impact), all driven by the same seed, so kappa/alpha/regime are identical across policies (common random numbers).
+  * The observation model and the IMM-PF run ONLINE, once per step. (run_stage4_benchmarks.py caches beliefs from a no-trade
+    pre-pass; that is only valid when nothing changes kappa/alpha/regime mid-episode, which inject_shock/force_regime do.)
+  * inject_shock / force_regime are applied by REBUILDING each generator from the seed with the new shock_step /
+    forced_regime_path and REPLAYING the trade history (exact; no change to the validated simulator).
+  * Semantics: a modification in the request for step t takes effect AT step t, i.e. before y_t is observed. shock:
+    alpha[t] *= m (simulator supports ONE shock per episode). force_regime: regime[t..t+duration) = r.
+  * Benchmark policies are the SAME closures as the Stage 4A benchmarks (make_policies), wrapped as interfaces.Policy objects.
+    Trained DDQN agents / ensembles come from agent_policies.py: the live loop builds each agent's observation vector
+    (same features/scaling as BeliefMDPEnv._obs) and passes it in PolicyInput.obs.
+  * Every non-oracle benchmark receives the filter belief; oracle policies receive truth instead (never both). Agents get
+    belief/truth only according to their arm (oracle: truth; filtered: belief; raw_proxy: neither) besides obs.
+  * A failed step is rolled back (snapshot + replay), so the same request can be retried.
+  * OPTIONAL Tier 1 guards (guards.py), off unless requested. EXPLORATORY: the stress band trimmed ensemble CVaR95 in the
+    offline study; the breaker did not work (see the Stage 4C addendum). Guard events are kept in guard_report().
+  * cum_cost (my definition; the contract does not give one) = S0 * shares_sold_so_far - sum(S_exec * v).
+"""
+from __future__ import annotations
+
+import copy
+import os
+import sys
+import threading
+import uuid
+from dataclasses import asdict
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "src"))
+sys.path.insert(0, os.path.join(HERE, "..", "validation"))
+
+import numpy as np
+
+import interfaces as I
+from simulator import SimParams
+from regime_simulator import RegimeSwitchingSimulator, RegimeParams, REGIME_RNG_TAG, force_regime_window
+from observation_model import ObsParams
+from spread_hawkes import make_observation_model_v2
+from imm_particle_filter import IMMParticleFilter, IMMParams
+from heuristic_policy import HeuristicParams
+from run_stage4_benchmarks import make_policies      # TODO: move make_policies into src/ so src never depends on validation/
+from guards import GuardConfig, GuardState, mtm_cost, resolve_stress
+from agent_policies import is_agent_name, make_agent_policy, build_obs, AGENT_TRAIN_PARTICLES
+
+class CloudIMM(IMMParticleFilter):
+    """IMMParticleFilter that keeps a copy of the reweighted, PRE-resample posterior of the latest update() when capture is on.
+    update() calls _predict() (interaction -> resample -> propagate) right after building the belief, so the state at the
+    start of _predict() is exactly the cloud the belief was computed from. Draws no random numbers."""
+    capture = False
+    last_posterior = None
+
+    def _predict(self):
+        if self.capture:
+            self.last_posterior = (self.kappa.copy(), self.alpha.copy(), self.w.copy(), self.mu.copy())
+        super()._predict()
+
+
+PRESETS = {"default": RegimeParams.default, "subtle": RegimeParams.subtle, "single": RegimeParams.single}
+OBS_KINDS = ("gaussian", "spread_hawkes")             # v1 'hawkes' violates Decision 1 (look-ahead): not offered
+DEFAULT_POLICIES = ("twap", "heuristic_belief", "ce_filtered", "ce_filtered_grid", "ce_oracle", "ce_oracle_grid")
+
+
+class ContractError(RuntimeError):
+    """A step produced a response that violates the Stage 0 contract (the step is rolled back)."""
+
+
+class FnPolicy:
+    """Adapts a benchmark closure fn(t, state, belief) to the interfaces.Policy protocol."""
+
+    def __init__(self, name: str, fn):
+        self.name = name
+        self.fn = fn
+        self.uses_oracle_truth = "oracle" in name
+        self.uses_belief = not self.uses_oracle_truth      # every non-oracle policy gets the filter belief; oracle ones get truth instead
+
+    def reset(self, seed=None) -> None:
+        pass
+
+    def act(self, x: I.PolicyInput) -> float:
+        state = {"t": x.t, "q": x.q, "N": x.N}
+        if self.uses_oracle_truth:
+            if x.truth is None:
+                raise ValueError(f"{self.name} declares uses_oracle_truth but got truth=None")
+            state.update(S=x.truth.S, kappa=x.truth.kappa, alpha=x.truth.alpha, regime=x.truth.regime)
+        elif x.truth is not None:
+            raise ValueError(f"{self.name} must not receive truth")
+        v = float(self.fn(x.t, state, x.belief))
+        if x.t >= x.N - 1:
+            v = float(x.q)                           # forced liquidation, identical for every policy (as in the benchmarks)
+        return float(min(max(v, 0.0), x.q))
+
+
+class LiveEpisode:
+    def __init__(self, seed: int, obs_kind: str = "gaussian", regime_preset: str = "default",
+                 policies=DEFAULT_POLICIES, imm_particles: int = 2000, episode_id: str | None = None,
+                 guards: GuardConfig | None = None, particle_sample: int = 0):
+        if obs_kind not in OBS_KINDS:
+            raise ValueError(f"obs_kind must be one of {OBS_KINDS}")
+        if regime_preset not in PRESETS:
+            raise ValueError(f"regime_preset must be one of {tuple(PRESETS)}")
+        self.seed, self.obs_kind, self.regime_preset = int(seed), obs_kind, regime_preset
+        self.id = episode_id or f"ep-{uuid.uuid4().hex[:8]}"
+        self.lock = threading.RLock()        # re-entrant: step() wraps _step_inner(), which also takes the lock
+        self.broken = False                  # set only if a rollback itself fails
+        self.notes = []
+
+        self.sp = SimParams()
+        self.rp = PRESETS[regime_preset]()
+        self.rp.init_probs = self.rp.stationary_distribution()          # Decision 5 / Stage 3 'stationary_init'
+        self.op = ObsParams()
+        self.N, self.K = self.sp.N, self.rp.n_regimes
+        st = I.seed_streams(self.seed)
+
+        sim0 = RegimeSwitchingSimulator(self.sp, self.rp, seed=st["sim"])
+        self.regime_path = sim0.sample_regime_path(self.N, np.random.default_rng([st["sim"], REGIME_RNG_TAG]))
+        self.shock_step, self.shock_mult = None, 3.0
+        self.regime_forced = False
+
+        self.om = make_observation_model_v2(obs_kind, seed=st["obs"], tau=self.sp.tau)
+        self.om.reset(st["obs"])
+        self.particle_sample = int(particle_sample)
+        if not 0 <= self.particle_sample <= imm_particles:
+            raise ValueError(f"particle_sample must be in [0, {imm_particles}]")
+        self.imm = CloudIMM(self.sp, self.op, self.rp, IMMParams(n_particles=imm_particles), seed=0)
+        self.imm.capture = self.particle_sample > 0
+        self.imm.reset(st["filter"])
+
+        fns = make_policies(self.sp, self.rp, HeuristicParams(), {})
+        names = list(policies)
+        pols, unknown = [], []
+        for n in names:
+            if n in fns:
+                pols.append(FnPolicy(n, fns[n]))
+            elif is_agent_name(n):
+                pols.append(make_agent_policy(n, obs_kind))          # ValueError for a bad name / family / missing checkpoint
+            else:
+                unknown.append(n)
+        if unknown:
+            raise ValueError(f"unknown policies {unknown}; benchmarks: {sorted(fns)}; trained agents: ens_<arm>, ddqn_<arm>_s<k> (see /api/policies)")
+        self.policies = pols
+        self.ref = self.policies[0].name                                  # exogenous truth is read from this policy's generator
+        if imm_particles != AGENT_TRAIN_PARTICLES and any(getattr(p, "needs_obs", False) and p.uses_belief for p in pols):
+            self.notes.append(f"filtered agents were evaluated with {AGENT_TRAIN_PARTICLES} filter particles per regime; "
+                              f"this episode uses {imm_particles}, so the beliefs they see are noisier than in Stage 3")
+
+        # ---- optional Tier 1 guards
+        self.guard = None
+        if guards is not None and guards.active:
+            if "twap" not in names:
+                raise ValueError("guards need the 'twap' policy hosted (it is the shadow baseline)")
+            gnames = tuple(guards.policies) if guards.policies is not None else tuple(n for n in names if n != "twap")
+            bad = [n for n in gnames if n not in names or n == "twap"]
+            if bad:
+                raise ValueError(f"cannot guard {bad}: must be hosted and not 'twap'")
+            stress = resolve_stress(guards, self.rp.names, self.K)
+            self.guard = GuardState(guards, gnames, stress)
+
+        self.world = I.WorldConfig(sim=asdict(self.sp),
+                                   regime={"P": self.rp.P, "names": self.rp.names, "specs": [asdict(s) for s in self.rp.specs]},
+                                   obs_kind=obs_kind)
+        self.t, self.done = 0, False
+        self.hist = {p.name: {"v": [], "sold": 0.0, "proceeds": 0.0} for p in self.policies}
+        self.obs_rows, self.beliefs, self.episodes = [], [], {}
+        self.gen, self.state = {}, {}
+        self._rebuild()
+
+    # ------------------------------------------------------------------ simulator (re)construction
+    def _new_gen(self):
+        sim = RegimeSwitchingSimulator(self.sp, self.rp, seed=self.seed)
+        return sim.run_stepwise(shock_step=self.shock_step, shock_jump_alpha_mult=self.shock_mult,
+                                seed=self.seed, forced_regime_path=self.regime_path)
+
+    def _rebuild(self) -> None:
+        """Fresh generators + replay of each policy's own trade history -> state at the current step t."""
+        for p in self.policies:
+            g = self._new_gen()
+            s = next(g)
+            for v in self.hist[p.name]["v"]:
+                s = g.send(v)
+            self.gen[p.name], self.state[p.name] = g, s
+
+    def config(self) -> dict:
+        return {"obs_kind": self.obs_kind, "n_regimes": self.K, "regime_names": list(self.rp.names),
+                "q0": float(self.sp.q0), "S0": float(self.sp.S0)}
+
+    def guard_report(self) -> dict:
+        return self.guard.report() if self.guard is not None else {"enabled": False}
+
+    # ------------------------------------------------------------------ rollback support
+    def _snapshot(self) -> dict:
+        return {"t": self.t, "done": self.done, "shock_step": self.shock_step, "shock_mult": self.shock_mult,
+                "regime_path": copy.deepcopy(self.regime_path), "regime_forced": self.regime_forced,
+                "om": copy.deepcopy(self.om), "imm": copy.deepcopy(self.imm), "hist": copy.deepcopy(self.hist),
+                "n_obs": len(self.obs_rows), "n_bel": len(self.beliefs), "episodes": dict(self.episodes),
+                "guard": self.guard.snapshot() if self.guard is not None else None}
+
+    def _restore(self, s: dict) -> None:
+        self.t, self.done = s["t"], s["done"]
+        self.shock_step, self.shock_mult = s["shock_step"], s["shock_mult"]
+        self.regime_path, self.regime_forced = s["regime_path"], s["regime_forced"]
+        self.om, self.imm, self.hist = s["om"], s["imm"], s["hist"]
+        del self.obs_rows[s["n_obs"]:]
+        del self.beliefs[s["n_bel"]:]
+        self.episodes = s["episodes"]
+        if self.guard is not None:
+            self.guard.restore(s["guard"])
+        self._rebuild()                      # generators cannot be copied: replay the restored trade history
+
+    # ------------------------------------------------------------------ one step
+    def step(self, inject_shock: float | None = None, force_regime: dict | None = None) -> dict:
+        with self.lock:
+            if self.broken:
+                raise RuntimeError("episode is unusable: a failed step could not be rolled back")
+            if self.done:
+                raise RuntimeError("episode finished")
+            snap = self._snapshot()
+            try:
+                resp = self._step_inner(inject_shock, force_regime)
+                errs = I.validate_step_response(resp)
+                if errs:
+                    raise ContractError(f"step response violates the contract: {errs}")
+                return resp
+            except Exception:
+                try:
+                    self._restore(snap)
+                except Exception:
+                    self.broken = True       # never serve a half-restored episode
+                raise
+
+    def _step_inner(self, inject_shock: float | None = None, force_regime: dict | None = None) -> dict:
+        with self.lock:
+            if self.done:
+                raise RuntimeError("episode finished")
+            t, events = self.t, []
+
+            # validate everything first, then mutate
+            if inject_shock is not None:
+                m = float(inject_shock)
+                if not 2.0 <= m <= 5.0:
+                    raise ValueError("inject_shock must be in [2, 5]")
+                if self.shock_step is not None:
+                    raise ValueError("only one shock per episode is supported by the simulator")
+            if force_regime is not None:
+                r, d = int(force_regime["regime"]), int(force_regime["duration"])
+                if not 0 <= r < self.K:
+                    raise ValueError(f"regime must be in [0, {self.K - 1}]")
+                if d < 1:
+                    raise ValueError("duration must be >= 1")
+            changed = False
+            if inject_shock is not None:
+                self.shock_step, self.shock_mult = t, m
+                events.append({"type": "shock_injected", "t": t, "mult": m})
+                changed = True
+            if force_regime is not None:
+                self.regime_path = force_regime_window(self.regime_path, t, d, r)
+                self.regime_forced = True
+                events.append({"type": "regime_forced", "t": t, "regime": r, "duration": d})
+                changed = True
+            if changed:
+                self._rebuild()
+
+            ref = self.state[self.ref]
+            truth = I.TruthStep.from_state(ref)
+            raw = self.om.observe_step(float(ref["kappa"]), float(ref["alpha"]), int(ref["regime"]))
+            obs = I.Observation.from_dict(t, raw)
+            belief = self.imm.update(obs)
+            errs = I.validate_belief(belief, K=self.K)
+            if errs:
+                raise RuntimeError(f"invalid belief at t={t}: {errs}")
+            self.obs_rows.append({**obs.core_dict(), **obs.extras})
+            self.beliefs.append(belief)
+
+            # guards: shadow TWAP cost and stress probability, computed once per step before any policy trades
+            if self.guard is not None:
+                tw_s, tw_h = self.state["twap"], self.hist["twap"]
+                tw_cost = mtm_cost(self.sp.S0, self.sp.q0, tw_h["proceeds"], float(tw_s["q"]), float(tw_s["S"]))
+                p_stress = self.guard.p_stress(belief)
+
+            out = {}
+            for p in self.policies:
+                s = self.state[p.name]
+                h = self.hist[p.name]
+                tp = I.TruthStep.from_state(s)
+                kw = {}
+                if getattr(p, "needs_obs", False):                       # trained agent: build its observation vector
+                    p.last_action = None
+                    kw["obs"] = build_obs(p.cfg, q=float(s["q"]), q0=float(self.sp.q0), t=t, N=self.N, px=obs,
+                                          belief=belief, truth=tp if p.uses_oracle_truth else None)
+                x = I.PolicyInput(t=t, N=self.N, q=float(s["q"]),
+                                  belief=belief if p.uses_belief else None,
+                                  truth=tp if p.uses_oracle_truth else None, **kw)
+                if self.guard is not None and self.guard.guarded(p.name):
+                    gap = mtm_cost(self.sp.S0, self.sp.q0, h["proceeds"], float(s["q"]), float(s["S"])) - tw_cost
+                    if self.guard.breaker(p.name, t, gap):
+                        v = float(s["q"]) / (self.N - t)             # switched off: TWAP rate (all of q on the last step)
+                    else:
+                        v = self.guard.constrain(p.name, t, self.N, float(s["q"]), p.act(x), p_stress)
+                else:
+                    v = p.act(x)
+                S_exec = float(s["S"] - s["alpha"] * v)
+                h["v"].append(v); h["sold"] += v; h["proceeds"] += S_exec * v
+                entry = {"q": float(s["q"]), "v": v, "S": float(s["S"]), "S_exec": S_exec,
+                         "cum_cost": float(self.sp.S0 * h["sold"] - h["proceeds"])}
+                la = getattr(p, "last_action", None)
+                if la is not None:                                        # trained agent: the raw greedy choice
+                    entry["action"], entry["mult"] = int(la), float(p.mults[la])
+                out[p.name] = entry
+                if t < self.N - 1:
+                    self.state[p.name] = self.gen[p.name].send(v)
+                else:
+                    try:
+                        self.gen[p.name].send(v)
+                    except StopIteration as stop:
+                        self.episodes[p.name] = stop.value
+
+            self.t += 1
+            self.done = self.t >= self.N
+            resp = I.step_response(episode_id=self.id, seed=self.seed, truth=truth, obs=obs, belief=belief,
+                                   policies=out, config=self.config(), done=self.done, events=events)
+            if self.particle_sample > 0:
+                resp["particles"] = self._particle_block(t)
+            return resp
+
+    # ------------------------------------------------------------------ results
+    def _particle_block(self, t: int) -> dict:
+        """Uniform sample (without replacement) of the filter's reweighted PRE-resample posterior particles at step t, per regime.
+        Own RNG stream (seed, t): the filter's RNG is untouched and a retried step returns the same sample.
+        w = particle weight * n_total (1.0 = average weight within its regime)."""
+        kap, alp, w, mu = self.imm.last_posterior
+        n, m = kap.shape[1], self.particle_sample
+        rng = np.random.default_rng([self.seed, int(t), 0xC10D])
+        regs = []
+        for j in range(kap.shape[0]):
+            idx = np.sort(rng.choice(n, size=m, replace=False))
+            regs.append({"regime": j, "prob": float(mu[j]), "n_total": int(n), "alpha": alp[j, idx].tolist(),
+                         "kappa": kap[j, idx].tolist(), "w": (w[j, idx] * n).tolist()})
+        return {"t": int(t), "n_per_regime": int(m), "regimes": regs,
+                "alpha_ref": getattr(self.op, "alpha_ref", None), "kappa_ref": getattr(self.op, "kappa_ref", None)}
+
+    def logs(self) -> dict:
+        """EpisodeLogs per policy (only after done). World config does not record injected shocks/forced regimes."""
+        if not self.done:
+            raise RuntimeError("episode not finished")
+        return {n: I.episode_log_from_episode(n, self.seed, self.world, ep, obs_rows=self.obs_rows, beliefs=self.beliefs)
+                for n, ep in self.episodes.items()}
+
+    def result(self) -> dict:
+        lg = self.logs()
+        tw = lg.get("twap")
+        return {"episode_id": self.id, "seed": self.seed,
+                "policies": {n: {"IS": l.IS, "IS_vs_twap": (l.IS - tw.IS) if tw is not None else None,
+                                 "contract_errors": I.validate_episode_log(l)} for n, l in lg.items()},
+                "modified": {"shock_step": self.shock_step, "regime_forced": self.regime_forced},
+                "guards": self.guard_report()}
