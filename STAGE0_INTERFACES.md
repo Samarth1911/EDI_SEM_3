@@ -74,15 +74,15 @@ Endpoints (**implemented in Stage 4C**: `backend/`, FastAPI; Decision 4 option A
 | # | Decision | My proposal |
 |---|---|---|
 | 1 | Timing/information convention | Causal window `((t-1)tau, t tau]`; decision at t uses `y_0..y_t`. Keep `spread_hawkes` as the reference. Fix or retire v1 Hawkes (Person 1: a one-line window shift plus re-validation, or drop v1 from the ablation). |
-| 2 | Does the filter know the true regime model? | Yes by default (as today); add a misspecified-model run as a sensitivity test. **Stage 2: implemented this way; misspecified-model results are in `STAGE2_HANDOFF.md` (b).** |
-| 3 | K>1 ESS definition | Combined weighted-set ESS, per-regime ESS in `per_regime`. **Stage 2: implemented exactly this way (`ess = 1/sum_j sum_i (mu_j w_ji)^2`, range [1, K*n_particles]); bounds are a HARD check.** |
-| 4 | Backend architecture | A: Python backend. **Stage 4: implemented (FastAPI, `backend/`); awaiting ratification.** |
+| 2 | Does the filter know the true regime model? | Yes by default (as today); add a misspecified-model run as a sensitivity test. **Stage 2: implemented this way; misspecified-model results are in `STAGE2_HANDOFF.md` (b).** **RATIFIED by the project owner (DEUS Group), 1 Nov 2026 (recorded by instruction; individual approvers are not named).** |
+| 3 | K>1 ESS definition | Combined weighted-set ESS, per-regime ESS in `per_regime`. **Stage 2: implemented exactly this way (`ess = 1/sum_j sum_i (mu_j w_ji)^2`, range [1, K*n_particles]); bounds are a HARD check.** **RATIFIED by the project owner (DEUS Group), 1 Nov 2026 (recorded by instruction; individual approvers are not named).** |
+| 4 | Backend architecture | A: Python backend. **Stage 4: implemented (FastAPI, `backend/`).** **RATIFIED by the project owner (DEUS Group), 1 Nov 2026 (recorded by instruction; individual approvers are not named).** |
 | 5 | Episode horizon vs regime persistence | Default `N=50` with per-step `P`: about 13% of episodes starting calm never see stress (0.96^50). Use stationary `init_probs` for training episodes or lengthen N. **Stages 2 and 3 use stationary initial regime probabilities for the world and the filter prior.** |
-| 6 | `PolicyInput.obs` (added in Stage 4) | Keep it: an optional trailing field holding the flat observation vector, so a learned agent can be hosted by the harness and the live API. Reported as verified by `check_agent_policies.py` (X1); awaiting ratification. |
+| 6 | `PolicyInput.obs` (added in Stage 4) | Keep it: an optional trailing field holding the flat observation vector, so a learned agent can be hosted by the harness and the live API. Reported as verified by `check_agent_policies.py` (X1). **RATIFIED by the project owner (DEUS Group), 1 Nov 2026 (recorded by instruction; individual approvers are not named).** |
 
 ## 9. Stage 2 addendum (Person 2) -- how the IMM-PF uses the contracts
 
-_Status: written against the contracts above and validated by a full run of `validation/validate_imm_pf.py` (10/10 HARD checks; numbers in `STAGE2_HANDOFF.md` (b)). Decisions 2 and 3 are still awaiting team ratification._
+_Status: written against the contracts above and validated by a full run of `validation/validate_imm_pf.py` (10/10 HARD checks; numbers in `STAGE2_HANDOFF.md` (b)). Decisions 2 and 3 were ratified by the project owner (DEUS Group) on 1 Nov 2026 (see Section 8)._
 
 **Conforms without change.** `IMMParticleFilter` implements `Estimator` (`reset(seed)`, `update(obs: Observation) -> BeliefState`), reads only `Observation.core_dict()`, never receives `regime` or truth, and returns a `BeliefState` with `K = 2`, `regime_probs`, `per_regime` (mean/std/prob/ESS per regime), pooled mixture moments, combined `ess`, `n_particles = K * n_per_bank` and `loglik_increment`. `validate_belief(b, K=2)` is applied to every belief in validation. A real K=2 belief also removes the one mismatch `validate_interfaces.py` had to whitelist (K=1 bootstrap belief vs `config.n_regimes = 2`); `validate_imm_pf.py` checks that a `StepResponse` built from an IMM belief passes `validate_step_response` with no exceptions.
 
@@ -123,7 +123,7 @@ _Status: based on the output of `check_agent_policies.py`, `check_particles.py`,
 **10.5 Open items.**
 1. The `particles` check ran on the default observation arm only; the `spread_hawkes` arm is untested for it.
 2. `validate_interfaces.py` has not been reported as rerun after the `PolicyInput` change.
-3. Decisions 2, 3, 4 and 6 (Section 8) still need team ratification.
+3. Decisions 2, 3, 4 and 6 (Section 8): ratified by the project owner (DEUS Group) on 1 Nov 2026 (individual approvers not named).
 4. Decision 1 (v1 Hawkes look-ahead) is unchanged: v1 is excluded from the ablations.
 
 ---

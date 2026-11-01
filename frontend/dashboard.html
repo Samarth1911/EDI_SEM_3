@@ -13,7 +13,7 @@ input[type=number],input[type=text]{width:92px;background:var(--panel);color:var
   <div class="tags"><a class="chip" href="index.html" style="text-decoration:none">← offline milestone demo</a></div>
 </header>
 <section class="bar">
-  <label>Seed <input id="seed" type="number" value="900000"></label>
+  <label>Seed <input id="seed" type="number" min="0" step="1" value="900000"></label>
   <label>Obs <select id="obs"><option>gaussian</option><option>spread_hawkes</option></select></label>
   <label>Agents <input id="pol" type="text" style="width:250px" value="ens_filt_full_bonus,ens_oracle,ens_raw_proxy" title="comma-separated Stage 3 policies; empty = server defaults. Gaussian default: ens_filt_full_bonus, ens_oracle, ens_raw_proxy. spread_hawkes: ens_oracle, ens_raw_proxy, ens_filt_full, ens_filt_mean_only (no bonus, no-regime or single-filter agents on that arm)"></label>
   <button id="go" class="btn">↺ New episode</button><button id="step" class="btn" disabled>Step</button><button id="run" class="btn primary" disabled>▶ Run</button>
@@ -69,7 +69,7 @@ async function newEpisode() {
   stop(); busy = false;
   try {
     const extra = $("pol").value.split(",").map((s) => s.trim()).filter(Boolean);
-    const req = { seed: +$("seed").value, obs_kind: $("obs").value, regime_preset: "default", particle_sample: 200 };
+    const req = { seed: Math.max(0, Math.floor(+$("seed").value || 0)), obs_kind: $("obs").value, regime_preset: "default", particle_sample: 200 };
     if (extra.length) req.policies = ["twap", "ce_filtered", "heuristic_belief", ...extra];
     const d = await call("/api/episode", "POST", req);
     eid = d.episode_id || d.id; store.reset(Object.assign({}, d, { episode_id: eid }));
